@@ -1,0 +1,206 @@
+name: Decompile Tweak
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'input/*.dylib'
+      - 'input/*.deb'
+
+jobs:
+  decompile:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find input file
+        id: find
+        run: |
+          # Support .dylib or .deb input
+          DYLIB=$(find input/ -name "*.dylib" | head -1)
+          DEB=$(find input/ -name "*.deb" | head -1)
+
+          if [ -n "$DYLIB" ]; then
+            echo "file=$DYLIB" >> $GITHUB_OUTPUT
+            echo "type=dylib" >> $GITHUB_OUTPUT
+            echo "Found dylib: $DYLIB"
+          elif [ -n "$DEB" ]; then
+            echo "file=$DEB" >> $GITHUB_OUTPUT
+            echo "type=deb" >> $GITHUB_OUTPUT
+            echo "Found deb: $DEB"
+          else
+            echo "ERROR: No .dylib or .deb found in input/"
+            exit 1
+          fi
+
+      - name: Extract dylib from deb (if needed)
+        if: steps.find.outputs.type == 'deb'
+        run: |
+          mkdir -p /tmp/deb_extract
+          cp "${{ steps.find.outputs.file }}" /tmp/input.deb
+          cd /tmp/deb_extract
+          ar x /tmp/input.deb
+          # data.tar contains the actual files
+          if [ -f data.tar.gz ]; then
+            tar xzf data.tar.gz
+          elif [ -f data.tar.xz ]; then
+            tar xJf data.tar.xz
+          elif [ -f data.tar.bz2 ]; then
+            tar xjf data.tar.bz2
+          elif [ -f data.tar.lzma ]; then
+            tar --lzma -xf data.tar.lzma
+          fi
+          DYLIB=$(find . -name "*.dylib" | head -1)
+          if [ -z "$DYLIB" ]; then
+            echo "ERROR: No dylib found inside deb"
+            exit 1
+          fi
+          cp "$DYLIB" /tmp/target.dylib
+          echo "Extracted dylib: $DYLIB"
+
+      - name: Copy dylib to target
+        if: steps.find.outputs.type == 'dylib'
+        run: cp "${{ steps.find.outputs.file }}" /tmp/target.dylib
+
+      - name: Get file info
+        run: |
+          mkdir -p results
+          echo "=== FILE INFO ===" > results/info.txt
+          file /tmp/target.dylib >> results/info.txt
+          echo "" >> results/info.txt
+          echo "=== ARCHS ===" >> results/info.txt
+          lipo -info /tmp/target.dylib >> results/info.txt 2>&1
+          echo "" >> results/info.txt
+          echo "=== SIZE ===" >> results/info.txt
+          ls -lh /tmp/target.dylib >> results/info.txt
+          cat results/info.txt
+
+      - name: Dump strings
+        run: |
+          echo "=== ALL STRINGS (length >= 6) ===" > results/strings.txt
+          strings -n 6 /tmp/target.dylib >> results/strings.txt
+
+          # Also dump categorized interesting strings
+          echo "=== URLS ===" > results/strings_interesting.txt
+          strings /tmp/target.dylib | grep -i "http\|https\|://" >> results/strings_interesting.txt || true
+
+          echo "" >> results/strings_interesting.txt
+          echo "=== KEYS / LICENSES ===" >> results/strings_interesting.txt
+          strings /tmp/target.dylib | grep -iE "key|licen|serial|token|secret|passw|auth|unlock|activat" >> results/strings_interesting.txt || true
+
+          echo "" >> results/strings_interesting.txt
+          echo "=== CLASS / METHOD HINTS ===" >> results/strings_interesting.txt
+          strings /tmp/target.dylib | grep -E "^\[|^-\[|^\+\[" >> results/strings_interesting.txt || true
+
+          echo "" >> results/strings_interesting.txt
+          echo "=== FILE PATHS ===" >> results/strings_interesting.txt
+          strings /tmp/target.dylib | grep -E "^/" >> results/strings_interesting.txt || true
+
+          echo "" >> results/strings_interesting.txt
+          echo "=== OBJC CLASS NAMES ===" >> results/strings_interesting.txt
+          strings /tmp/target.dylib | grep -E "^[A-Z][a-zA-Z]{3,}" | sort -u >> results/strings_interesting.txt || true
+
+      - name: Dump symbols
+        run: |
+          echo "=== ALL SYMBOLS ===" > results/symbols.txt
+          nm -arch arm64 /tmp/target.dylib 2>/dev/null >> results/symbols.txt || \
+          nm /tmp/target.dylib >> results/symbols.txt 2>&1
+
+          echo "=== EXPORTED SYMBOLS ===" > results/symbols_exported.txt
+          nm -arch arm64 -g /tmp/target.dylib 2>/dev/null >> results/symbols_exported.txt || true
+
+          echo "=== UNDEFINED SYMBOLS (dependencies) ===" > results/symbols_undefined.txt
+          nm -arch arm64 -u /tmp/target.dylib 2>/dev/null >> results/symbols_undefined.txt || true
+
+      - name: Dump ObjC headers with class-dump
+        run: |
+          mkdir -p results/headers
+          # class-dump is available on macOS runners
+          if command -v class-dump &>/dev/null; then
+            class-dump --arch arm64 /tmp/target.dylib > results/headers/classdump.h 2>&1 || \
+            class-dump /tmp/target.dylib > results/headers/classdump.h 2>&1
+          else
+            echo "class-dump not found, using otool for ObjC info" > results/headers/classdump.h
+          fi
+
+          # otool ObjC class info as fallback/supplement
+          echo "=== OBJC CLASSES (otool) ===" > results/headers/objc_classes.txt
+          otool -arch arm64 -ov /tmp/target.dylib >> results/headers/objc_classes.txt 2>&1 || \
+          otool -ov /tmp/target.dylib >> results/headers/objc_classes.txt 2>&1
+
+      - name: Dump load commands and imports
+        run: |
+          echo "=== LOAD COMMANDS ===" > results/load_commands.txt
+          otool -arch arm64 -l /tmp/target.dylib >> results/load_commands.txt 2>&1 || \
+          otool -l /tmp/target.dylib >> results/load_commands.txt 2>&1
+
+          echo "=== LINKED LIBRARIES ===" > results/linked_libs.txt
+          otool -arch arm64 -L /tmp/target.dylib >> results/linked_libs.txt 2>&1 || \
+          otool -L /tmp/target.dylib >> results/linked_libs.txt 2>&1
+
+          echo "=== DISASSEMBLY (first 500 lines) ===" > results/disasm.txt
+          otool -arch arm64 -tV /tmp/target.dylib 2>/dev/null | head -500 >> results/disasm.txt || \
+          otool -tV /tmp/target.dylib | head -500 >> results/disasm.txt 2>&1
+
+      - name: Install class-dump-swift and retry if needed
+        run: |
+          # Try to get better headers using nm + manual parse
+          echo "=== SWIFT SYMBOLS ===" > results/swift_symbols.txt
+          nm -arch arm64 /tmp/target.dylib 2>/dev/null | grep -i swift >> results/swift_symbols.txt || true
+
+          echo "=== SWIFT DEMANGLED ===" >> results/swift_symbols.txt
+          nm -arch arm64 /tmp/target.dylib 2>/dev/null | xcrun swift-demangle >> results/swift_symbols.txt 2>/dev/null || true
+
+      - name: Generate summary
+        run: |
+          cat > results/SUMMARY.txt << 'EOF'
+          ============================================
+          TWEAK DECOMPILE RESULTS
+          ============================================
+
+          FILES IN THIS ARCHIVE:
+          - SUMMARY.txt            this file
+          - info.txt               file type, arch, size
+          - strings.txt            all strings >= 6 chars
+          - strings_interesting.txt filtered: URLs, keys, classes, paths
+          - symbols.txt            all symbols (nm)
+          - symbols_exported.txt   exported symbols only
+          - symbols_undefined.txt  undefined/imported symbols
+          - load_commands.txt      Mach-O load commands
+          - linked_libs.txt        linked frameworks and dylibs
+          - disasm.txt             first 500 lines of disassembly
+          - swift_symbols.txt      Swift-specific symbols
+          - headers/classdump.h    ObjC class headers (class-dump)
+          - headers/objc_classes.txt ObjC class info (otool)
+
+          HOW TO USE:
+          1. Start with strings_interesting.txt - look for keys, URLs, auth strings
+          2. Check headers/classdump.h for class and method names
+          3. Use symbols_exported.txt to see what functions are public
+          4. Use linked_libs.txt to see what frameworks it depends on
+          5. Use disasm.txt for a quick look at the ARM64 assembly
+          ============================================
+          EOF
+
+          # Append quick stats
+          echo "" >> results/SUMMARY.txt
+          echo "QUICK STATS:" >> results/SUMMARY.txt
+          echo "Total strings: $(wc -l < results/strings.txt)" >> results/SUMMARY.txt
+          echo "Total symbols: $(wc -l < results/symbols.txt)" >> results/SUMMARY.txt
+          echo "Interesting strings: $(wc -l < results/strings_interesting.txt)" >> results/SUMMARY.txt
+
+          cat results/SUMMARY.txt
+
+      - name: Package results
+        run: |
+          cd results
+          zip -r ../decompiletweakresults.zip .
+          cd ..
+          ls -lh decompiletweakresults.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: decompiletweakresults
+          path: decompiletweakresults.zip
+          retention-days: 7
