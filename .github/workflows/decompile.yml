@@ -1,4 +1,4 @@
-name: Decompile
+name: Decompile Executable
 
 on:
   workflow_dispatch:
