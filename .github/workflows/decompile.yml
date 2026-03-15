@@ -56,8 +56,9 @@ jobs:
           IPA="${{ steps.detect.outputs.ipa_file }}"
           mkdir -p /tmp/ipa_extract
           unzip -q "$IPA" -d /tmp/ipa_extract
-          EXEC=$(find /tmp/ipa_extract -name "*.app" -maxdepth 3 | head -1)
-          EXEC=$(find "$EXEC" -maxdepth 1 -type f ! -name "*.*" | head -1)
+          APP=$(find /tmp/ipa_extract -name "*.app" -maxdepth 3 | head -1)
+          EXEC=$(find "$APP" -maxdepth 1 -type f ! -name "*.*" | head -1)
+          [ -z "$EXEC" ] && EXEC=$(find "$APP" -maxdepth 1 -type f | xargs ls -S 2>/dev/null | head -1)
           cp "$EXEC" /tmp/target_ipa_exec
 
       - name: Analyze dylib
@@ -65,65 +66,116 @@ jobs:
         run: |
           OUT="results/dylib"
           mkdir -p "$OUT/headers"
+
           echo "=== FILE INFO ===" > "$OUT/info.txt"
           file /tmp/target.dylib >> "$OUT/info.txt"
           lipo -info /tmp/target.dylib >> "$OUT/info.txt" 2>&1
           ls -lh /tmp/target.dylib >> "$OUT/info.txt"
+
           echo "=== ALL STRINGS ===" > "$OUT/strings.txt"
           strings -n 6 /tmp/target.dylib >> "$OUT/strings.txt"
+
           echo "=== URLS ===" > "$OUT/strings_interesting.txt"
           strings /tmp/target.dylib | grep -iE "http|https|://" >> "$OUT/strings_interesting.txt" || true
+          echo "" >> "$OUT/strings_interesting.txt"
           echo "=== KEYS / LICENSES ===" >> "$OUT/strings_interesting.txt"
-          strings /tmp/target.dylib | grep -iE "key|licen|serial|token|FREE_|redeem|valid|activat" >> "$OUT/strings_interesting.txt" || true
+          strings /tmp/target.dylib | grep -iE "key|licen|serial|token|FREE_|redeem|valid|activat|FREE|hash" >> "$OUT/strings_interesting.txt" || true
+          echo "" >> "$OUT/strings_interesting.txt"
           echo "=== FILE PATHS ===" >> "$OUT/strings_interesting.txt"
           strings /tmp/target.dylib | grep -E "^/" >> "$OUT/strings_interesting.txt" || true
+          echo "" >> "$OUT/strings_interesting.txt"
+          echo "=== OBJC CLASS NAMES ===" >> "$OUT/strings_interesting.txt"
+          strings /tmp/target.dylib | grep -E "^[A-Z][a-zA-Z]{3,}" | sort -u >> "$OUT/strings_interesting.txt" || true
+
           echo "=== ALL SYMBOLS ===" > "$OUT/symbols.txt"
           nm -arch arm64 /tmp/target.dylib 2>/dev/null >> "$OUT/symbols.txt" || nm /tmp/target.dylib >> "$OUT/symbols.txt" 2>&1
+
           echo "=== EXPORTED ===" > "$OUT/symbols_exported.txt"
           nm -arch arm64 -g /tmp/target.dylib 2>/dev/null >> "$OUT/symbols_exported.txt" || true
+
           echo "=== UNDEFINED ===" > "$OUT/symbols_undefined.txt"
           nm -arch arm64 -u /tmp/target.dylib 2>/dev/null >> "$OUT/symbols_undefined.txt" || true
+
           echo "=== LOAD COMMANDS ===" > "$OUT/load_commands.txt"
           otool -arch arm64 -l /tmp/target.dylib >> "$OUT/load_commands.txt" 2>&1 || true
+
           echo "=== LINKED LIBS ===" > "$OUT/linked_libs.txt"
           otool -arch arm64 -L /tmp/target.dylib >> "$OUT/linked_libs.txt" 2>&1 || true
-          echo "=== DISASSEMBLY ===" > "$OUT/disasm.txt"
+
+          echo "=== DISASSEMBLY (first 500 lines) ===" > "$OUT/disasm.txt"
           otool -arch arm64 -tV /tmp/target.dylib 2>/dev/null | head -500 >> "$OUT/disasm.txt" || true
+
+          if command -v class-dump &>/dev/null; then
+            class-dump --arch arm64 /tmp/target.dylib > "$OUT/headers/classdump.h" 2>&1 || true
+          else
+            echo "class-dump not available" > "$OUT/headers/classdump.h"
+          fi
           otool -arch arm64 -ov /tmp/target.dylib > "$OUT/headers/objc_classes.txt" 2>&1 || true
-          nm -arch arm64 /tmp/target.dylib 2>/dev/null | xcrun swift-demangle > "$OUT/swift_symbols.txt" 2>/dev/null || true
+
+          echo "=== SWIFT DEMANGLED ===" > "$OUT/swift_symbols.txt"
+          nm -arch arm64 /tmp/target.dylib 2>/dev/null | xcrun swift-demangle >> "$OUT/swift_symbols.txt" 2>/dev/null || true
+
+          echo "Dylib analysis done"
 
       - name: Analyze IPA
         if: steps.detect.outputs.target == 'ipa' || steps.detect.outputs.target == 'both'
         run: |
           OUT="results/ipa"
           mkdir -p "$OUT/headers"
+
           echo "=== FILE INFO ===" > "$OUT/info.txt"
           file /tmp/target_ipa_exec >> "$OUT/info.txt"
           lipo -info /tmp/target_ipa_exec >> "$OUT/info.txt" 2>&1
           ls -lh /tmp/target_ipa_exec >> "$OUT/info.txt"
           find /tmp/ipa_extract -name "global-metadata.dat" | grep -q . && echo "IL2CPP: YES" >> "$OUT/info.txt" || echo "IL2CPP: NO" >> "$OUT/info.txt"
+
           echo "=== ALL STRINGS ===" > "$OUT/strings.txt"
           strings -n 6 /tmp/target_ipa_exec >> "$OUT/strings.txt"
+
           echo "=== URLS ===" > "$OUT/strings_interesting.txt"
           strings /tmp/target_ipa_exec | grep -iE "http|https|://" >> "$OUT/strings_interesting.txt" || true
+          echo "" >> "$OUT/strings_interesting.txt"
           echo "=== KEYS / LICENSES ===" >> "$OUT/strings_interesting.txt"
-          strings /tmp/target_ipa_exec | grep -iE "key|licen|serial|token|FREE_|redeem|valid|activat" >> "$OUT/strings_interesting.txt" || true
+          strings /tmp/target_ipa_exec | grep -iE "key|licen|serial|token|FREE_|redeem|valid|activat|FREE|hash" >> "$OUT/strings_interesting.txt" || true
+          echo "" >> "$OUT/strings_interesting.txt"
           echo "=== FILE PATHS ===" >> "$OUT/strings_interesting.txt"
           strings /tmp/target_ipa_exec | grep -E "^/" >> "$OUT/strings_interesting.txt" || true
+          echo "" >> "$OUT/strings_interesting.txt"
+          echo "=== OBJC CLASS NAMES ===" >> "$OUT/strings_interesting.txt"
+          strings /tmp/target_ipa_exec | grep -E "^[A-Z][a-zA-Z]{3,}" | sort -u >> "$OUT/strings_interesting.txt" || true
+
           echo "=== ALL SYMBOLS ===" > "$OUT/symbols.txt"
           nm -arch arm64 /tmp/target_ipa_exec 2>/dev/null >> "$OUT/symbols.txt" || nm /tmp/target_ipa_exec >> "$OUT/symbols.txt" 2>&1
+
           echo "=== EXPORTED ===" > "$OUT/symbols_exported.txt"
           nm -arch arm64 -g /tmp/target_ipa_exec 2>/dev/null >> "$OUT/symbols_exported.txt" || true
+
           echo "=== UNDEFINED ===" > "$OUT/symbols_undefined.txt"
           nm -arch arm64 -u /tmp/target_ipa_exec 2>/dev/null >> "$OUT/symbols_undefined.txt" || true
+
           echo "=== LOAD COMMANDS ===" > "$OUT/load_commands.txt"
           otool -arch arm64 -l /tmp/target_ipa_exec >> "$OUT/load_commands.txt" 2>&1 || true
+
           echo "=== LINKED LIBS ===" > "$OUT/linked_libs.txt"
           otool -arch arm64 -L /tmp/target_ipa_exec >> "$OUT/linked_libs.txt" 2>&1 || true
-          echo "=== DISASSEMBLY ===" > "$OUT/disasm.txt"
+
+          echo "=== DISASSEMBLY (first 500 lines) ===" > "$OUT/disasm.txt"
           otool -arch arm64 -tV /tmp/target_ipa_exec 2>/dev/null | head -500 >> "$OUT/disasm.txt" || true
+
+          if command -v class-dump &>/dev/null; then
+            class-dump --arch arm64 /tmp/target_ipa_exec > "$OUT/headers/classdump.h" 2>&1 || true
+          else
+            echo "class-dump not available" > "$OUT/headers/classdump.h"
+          fi
           otool -arch arm64 -ov /tmp/target_ipa_exec > "$OUT/headers/objc_classes.txt" 2>&1 || true
-          find /tmp/ipa_extract -type f | sed "s|/tmp/ipa_extract/||" | sort > "$OUT/bundle_contents.txt"
+
+          echo "=== SWIFT DEMANGLED ===" > "$OUT/swift_symbols.txt"
+          nm -arch arm64 /tmp/target_ipa_exec 2>/dev/null | xcrun swift-demangle >> "$OUT/swift_symbols.txt" 2>/dev/null || true
+
+          echo "=== APP BUNDLE CONTENTS ===" > "$OUT/bundle_contents.txt"
+          find /tmp/ipa_extract -type f | sed "s|/tmp/ipa_extract/||" | sort >> "$OUT/bundle_contents.txt"
+
+          echo "IPA analysis done"
 
       - name: Package and upload dylib results
         if: steps.detect.outputs.target == 'dylib'
@@ -133,7 +185,7 @@ jobs:
         if: steps.detect.outputs.target == 'ipa'
         run: cd results/ipa && zip -r ../../decompiletweakresults.zip .
 
-      - name: Package both results
+      - name: Package both
         if: steps.detect.outputs.target == 'both'
         run: |
           cd results/dylib && zip -r ../../decompile_dylib.zip . && cd ../..
