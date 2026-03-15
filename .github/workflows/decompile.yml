@@ -11,11 +11,6 @@ on:
           - dylib
           - ipa
           - both
-  push:
-    paths:
-      - 'input/*.dylib'
-      - 'input/*.deb'
-      - 'input/*.ipa'
 
 jobs:
   decompile:
