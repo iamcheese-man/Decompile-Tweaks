@@ -102,8 +102,9 @@ jobs:
           echo "=== LINKED LIBS ===" > "$OUT/linked_libs.txt"
           otool -arch arm64 -L /tmp/target.dylib >> "$OUT/linked_libs.txt" 2>&1 || true
 
-          echo "=== DISASSEMBLY (first 500 lines) ===" > "$OUT/disasm.txt"
-          otool -arch arm64 -tV /tmp/target.dylib 2>/dev/null | head -500 >> "$OUT/disasm.txt" || true
+          echo "=== DISASSEMBLY (all lines) ===" > "$OUT/disasm.txt"
+          otool -arch arm64 -tV /tmp/target.dylib 2>/dev/null >> "$OUT/disasm.txt" || true
+
 
           if command -v class-dump &>/dev/null; then
             class-dump --arch arm64 /tmp/target.dylib > "$OUT/headers/classdump.h" 2>&1 || true
