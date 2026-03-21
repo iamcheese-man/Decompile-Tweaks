@@ -103,7 +103,7 @@ jobs:
           otool -arch arm64 -L /tmp/target.dylib >> "$OUT/linked_libs.txt" 2>&1 || true
 
           echo "=== DISASSEMBLY (all lines) ===" > "$OUT/disasm.txt"
-          otool -arch arm64 -tV /tmp/target.dylib 2>/dev/null | grep -A 80 "fopen\|SecItemCopyMatching\|identifierForVendor\|gettimeofday\|clock_gettime" > "$OUT/disasm.txt" || true
+          otool -arch arm64 -tV /tmp/target.dylib 2>/dev/null | grep -A 80 "fgets\|fread\|fwrite\|license\|identifierForVendor" > "$OUT/disasm.txt" || true
 
           if command -v class-dump &>/dev/null; then
             class-dump --arch arm64 /tmp/target.dylib > "$OUT/headers/classdump.h" 2>&1 || true
